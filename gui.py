@@ -160,20 +160,36 @@ class EONParserGUI(QMainWindow):
 
         # (Optional: Add more relevant CSV examples)
         examples = [
-            "Show firewall denies in the last hour",
-            "Find traffic to 8.8.8.8 today",
-            "Count events by action",
-            "Show trend of logs over time",
-            "Visualize distribution of protocols",
-            "Find logs for user 'admin' in source_file 'vpn.csv'"
+            "Show connection denies in the last 24 hours", 
+            "Find all traffic from 192.168.1.100",
+            "Show failed VPN authentication attempts",
+            "Count events by severity level",
+            "Find all ACL drops by source IP",
+            "Show logs with message containing 'crypto'",
+            "Visualize connection activity over time",
+            "Find all NAT translations for internal network",
+            "Show logs with high severity",
+            "Count authentication failures by username"
         ]
+
+        # And update the example_layout section to display more examples if needed:
+
         example_layout = QHBoxLayout()
-        for example in examples[:3]: # Limit examples shown initially
+        for example in examples[:4]:  # Show first 4 examples
             btn = QPushButton(example)
             btn.setStyleSheet("text-align:left; padding: 4px;")
             btn.clicked.connect(lambda _, e=example: self.query_edit.setText(e))
             example_layout.addWidget(btn)
         layout.addLayout(example_layout)
+
+        # Add a second row of examples for better coverage
+        example_layout2 = QHBoxLayout()
+        for example in examples[4:8]:  # Show next 4 examples
+            btn = QPushButton(example)
+            btn.setStyleSheet("text-align:left; padding: 4px;")
+            btn.clicked.connect(lambda _, e=example: self.query_edit.setText(e))
+            example_layout2.addWidget(btn)
+        layout.addLayout(example_layout2)
 
 
         self.params_display = QTextEdit()

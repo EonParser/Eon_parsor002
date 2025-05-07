@@ -123,9 +123,8 @@ class NLPQueryProcessor:
             time_info["end"] = today.astimezone(utc)
             return time_info
     
-    # Default to LAST 24 hours (not future)
-        time_info["start"] = (now - timedelta(hours=24)).astimezone(utc)
-        time_info["end"] = now.astimezone(utc)
+        time_info["start"] = None
+        time_info["end"] = None
         return time_info
     
     def _determine_visualization_type(self, query: str, doc) -> str:
