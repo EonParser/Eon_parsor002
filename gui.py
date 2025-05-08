@@ -3,11 +3,13 @@ import sys
 import traceback
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, QTextEdit, QLabel,
-                             QRadioButton, QCheckBox, QLineEdit, QProgressBar, QFrame, QMessageBox, QGridLayout) # Added QMessageBox
+                             QRadioButton, QCheckBox, QLineEdit, QProgressBar, QFrame, QMessageBox, QGridLayout, QProgressDialog) # Added QMessageBox
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl # Added QUrl
 from PyQt5.QtGui import QDesktopServices # Added QDesktopServices
+from PyQt5.QtWebEngineWidgets import QWebEngineView
 import pandas as pd
 import os
+import gc
 import numpy as np # Import numpy
 from datetime import datetime
 # Use Plotly's Qt backend integration if available and desired, or keep Matplotlib
@@ -158,20 +160,36 @@ class EONParserGUI(QMainWindow):
 
         # (Optional: Add more relevant CSV examples)
         examples = [
-            "Show firewall denies in the last hour",
-            "Find traffic to 8.8.8.8 today",
-            "Count events by action",
-            "Show trend of logs over time",
-            "Visualize distribution of protocols",
-            "Find logs for user 'admin' in source_file 'vpn.csv'"
+            "Show connection denies in the last 24 hours", 
+            "Find all traffic from 192.168.1.100",
+            "Show failed VPN authentication attempts",
+            "Count events by severity level",
+            "Find all ACL drops by source IP",
+            "Show logs with message containing 'crypto'",
+            "Visualize connection activity over time",
+            "Find all NAT translations for internal network",
+            "Show logs with high severity",
+            "Count authentication failures by username"
         ]
+
+        # And update the example_layout section to display more examples if needed:
+
         example_layout = QHBoxLayout()
-        for example in examples[:3]: # Limit examples shown initially
+        for example in examples[:4]:  # Show first 4 examples
             btn = QPushButton(example)
             btn.setStyleSheet("text-align:left; padding: 4px;")
             btn.clicked.connect(lambda _, e=example: self.query_edit.setText(e))
             example_layout.addWidget(btn)
         layout.addLayout(example_layout)
+
+        # Add a second row of examples for better coverage
+        example_layout2 = QHBoxLayout()
+        for example in examples[4:8]:  # Show next 4 examples
+            btn = QPushButton(example)
+            btn.setStyleSheet("text-align:left; padding: 4px;")
+            btn.clicked.connect(lambda _, e=example: self.query_edit.setText(e))
+            example_layout2.addWidget(btn)
+        layout.addLayout(example_layout2)
 
 
         self.params_display = QTextEdit()
@@ -273,7 +291,7 @@ class EONParserGUI(QMainWindow):
         layout.addWidget(self.viz_canvas_frame, 1) # Allow frame to stretch
 
 
-        export_btn = QPushButton("Export Visualization (PNG)")
+        export_btn = QPushButton("Export Visualization")
         export_btn.clicked.connect(self.export_visualization)
         # Add alignment or place in a layout for better positioning
         export_layout = QHBoxLayout()
@@ -682,182 +700,296 @@ class EONParserGUI(QMainWindow):
 
 
     def generate_visualization(self):
-         # Check again before starting thread
+        # Check again before starting thread
         if self.current_results is None or self.current_results.empty:
-             self.status_label.setText("Cannot visualize: No results available.")
-             return
+            self.status_label.setText("Cannot visualize: No results available.")
+            return
 
         # Determine viz type: Use selected type OR the one from NLP if 'auto'
         viz_type_to_generate = self.viz_type
         if viz_type_to_generate == "auto":
-             # Fallback to NLP suggestion or a default like 'trend' or 'bar'
-             viz_type_to_generate = self.current_summary.get("viz_type", "trend") # Default to trend if NLP gives none
-             print(f"Auto visualization: Using type '{viz_type_to_generate}'")
+            # Fallback to NLP suggestion or a default like 'trend' or 'bar'
+            viz_type_to_generate = self.current_summary.get("viz_type", "trend")
+            print(f"Auto visualization: Using type '{viz_type_to_generate}'")
+
+        # Enforce a maximum row limit to prevent memory issues
+        max_rows = 20000  # Adjust as needed based on your system capabilities
+        if len(self.current_results) > max_rows:
+            # Create a notification of the limit
+            QMessageBox.information(
+                self, 
+                "Large Dataset Notice", 
+                f"Your dataset contains {len(self.current_results)} rows, which may cause performance issues. " 
+                f"The visualization will be created using a sampled subset of {max_rows} rows."
+            )
 
         self.status_label.setText(f"Generating {viz_type_to_generate} visualization...")
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0,0) # Indeterminate
+        self.progress_bar.setRange(0, 0)  # Indeterminate
 
+        self.start_thread(
+            self.visualizer.generate_visualization,
+            self._display_visualization,
+            self.handle_thread_error,
+            self.current_results, 
+            self.current_summary, 
+            viz_type_to_generate
+        )
 
-        self.start_thread(self.visualizer.generate_visualization,
-                           self._display_visualization,
-                           self.handle_thread_error,
-                           self.current_results, self.current_summary, viz_type_to_generate)
+    def _cleanup_visualization_resources(self):
+        """Free memory resources used by visualizations"""
+        # Clear previous visualization
+        old_canvas = self.viz_canvas_frame.findChild(FigureCanvas)
+        if old_canvas:
+            self.viz_canvas_layout.removeWidget(old_canvas)
+            old_canvas.deleteLater()
+        
+        # Clear any web views that might be using memory
+        web_view = self.viz_canvas_frame.findChild(QWebEngineView)
+        if web_view:
+            self.viz_canvas_layout.removeWidget(web_view)
+            web_view.deleteLater()
+        
+        # Clear any other widgets in the layout
+        for i in reversed(range(self.viz_canvas_layout.count())):
+            widget = self.viz_canvas_layout.itemAt(i).widget()
+            if widget is not None:
+                self.viz_canvas_layout.removeWidget(widget)
+                widget.deleteLater()
+        
+        # Reset current visualization
+        if hasattr(self, 'current_visualization') and self.current_visualization:
+            self.current_visualization = None
+        
+        # Force garbage collection
+        gc.collect()
 
     def _display_visualization(self, viz_data):
-            self.progress_bar.setVisible(False)
+        self.progress_bar.setVisible(False)
 
-            # --- Clear previous visualization ---
-            # Find existing canvas widget within the layout/frame
-            old_canvas = self.viz_canvas_frame.findChild(FigureCanvas)
-            if old_canvas:
-                self.viz_canvas_layout.removeWidget(old_canvas)
-                old_canvas.deleteLater() # Ensure proper cleanup
-            # Also clear any potential error messages/labels
-            for i in reversed(range(self.viz_canvas_layout.count())):
-                widget = self.viz_canvas_layout.itemAt(i).widget()
-                if widget is not None:
-                    widget.deleteLater()
+        # --- Clear previous visualization ---
+        # Find existing widgets within the layout/frame and remove them
+        for i in reversed(range(self.viz_canvas_layout.count())):
+            widget = self.viz_canvas_layout.itemAt(i).widget()
+            if widget is not None:
+                self.viz_canvas_layout.removeWidget(widget)
+                widget.deleteLater()
 
-            # --- Display new visualization ---
-            # Check if viz_data is a dictionary and has 'type'
-            if not isinstance(viz_data, dict) or 'type' not in viz_data:
-                self.status_label.setText("Visualization failed: Invalid data format received.")
-                error_label = QLabel("Failed to generate visualization (Invalid Format).")
+        # --- Display new visualization ---
+        # Check if viz_data is a dictionary and has 'type'
+        if not isinstance(viz_data, dict) or 'type' not in viz_data:
+            self.status_label.setText("Visualization failed: Invalid data format received.")
+            error_label = QLabel("Failed to generate visualization (Invalid Format).")
+            self.viz_canvas_layout.addWidget(error_label)
+            print(f"Error: viz_data received is not a valid dictionary: {viz_data}")
+            return
+
+        viz_type = viz_data.get("type", "Unknown")
+        viz_payload = viz_data.get("data")  # Get the data payload
+
+        if viz_type == "plotly" and viz_payload and isinstance(viz_payload, go.Figure):  # Check type
+            try:
+                # Create a QWebEngineView to display the Plotly figure
+                web_view = QWebEngineView()
+                web_view.setMinimumSize(600, 400)
+                
+                # Convert Plotly figure to HTML and load it into the web view
+                html = viz_payload.to_html(include_plotlyjs='cdn')
+                web_view.setHtml(html)
+                
+                # Add the web view to the layout
+                self.viz_canvas_layout.addWidget(web_view)
+                
+                # Store the Plotly figure for potential export
+                self.current_visualization = {'type': 'plotly', 'figure': viz_payload}
+                self.status_label.setText(f"Plotly visualization displayed.")
+                
+            except Exception as e:
+                self.status_label.setText("Error displaying visualization.")
+                error_label = QLabel(f"Could not display plot: {e}")
                 self.viz_canvas_layout.addWidget(error_label)
-                print(f"Error: viz_data received is not a valid dictionary: {viz_data}")
-                return
+                print(f"Visualization display error: {e}\n{traceback.format_exc()}")
 
-            viz_type = viz_data.get("type", "Unknown")
-            viz_payload = viz_data.get("data") # Get the data payload
+        elif viz_type == "table":
+            # Handle tabular data (same as original)
+            message = "Visualization resulted in tabular data (not plotted)."
+            if isinstance(viz_payload, dict) and "message" in viz_payload:
+                message = viz_payload.get("message", message)
+            elif isinstance(viz_payload, list):
+                record_count = len(viz_payload)
+                message = f"Visualization generated tabular data ({record_count} records)."
+                if record_count > 0:
+                    message += " Use 'Export Results' to view full data."
+                else:
+                    message = "Visualization query resulted in no tabular data."
+            elif viz_payload is None:
+                message = "Visualization resulted in empty table data."
 
-            if viz_type == "plotly" and viz_payload and isinstance(viz_payload, go.Figure): # Check type
-                try:
-                    fig = viz_payload # Assuming data is the Plotly figure object
+            label = QLabel(message)
+            label.setAlignment(Qt.AlignCenter)
+            label.setWordWrap(True)
+            self.viz_canvas_layout.addWidget(label)
+            self.status_label.setText("Visualization resulted in table (not plotted).")
+            self.current_visualization = None
 
-                    # --- Using Matplotlib backend to embed Plotly figure ---
-                    # Requires installing kaleido: pip install -U kaleido
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
-                        img_path = tmpfile.name
-                        try:
-                            fig.write_image(img_path, scale=2) # Increase scale for better resolution
-                        except Exception as img_err:
-                            print(f"Error exporting Plotly figure to image: {img_err}")
-                            self.status_label.setText("Error rendering visualization.")
-                            error_label = QLabel(f"Error rendering plot: {img_err}")
-                            self.viz_canvas_layout.addWidget(error_label)
-                            # Clean up temp file on error if it exists
-                            if os.path.exists(img_path): 
-                                try: os.unlink(img_path); 
-                                except OSError: pass
-                            return # Stop if image export fails
+        else:
+            # Handle other types or errors
+            error_msg = f"Unsupported or failed visualization type: {viz_type}"
+            if isinstance(viz_payload, dict) and "message" in viz_payload:
+                error_msg = viz_payload.get("message", error_msg)
+            elif viz_payload is None and viz_type == "plotly":
+                error_msg = "Failed to generate Plotly figure data."
 
-                    # Read the image back using Matplotlib
-                    from matplotlib.image import imread
-                    import matplotlib.pyplot as plt # Import pyplot
-
-                    try:
-                        img = imread(img_path)
-                    finally:
-                        # Clean up the temporary file
-                        if os.path.exists(img_path):
-                            try: os.unlink(img_path)
-                            except OSError as e: print(f"Warning: Could not delete temp viz file {img_path}: {e}")
-
-
-                    # Create a Matplotlib figure and axes to display the image
-                    mpl_fig, ax = plt.subplots()
-                    ax.imshow(img)
-                    ax.axis('off') # Hide axes
-                    plt.tight_layout(pad=0) # Remove padding
-
-                    # Create Matplotlib canvas and add it
-                    canvas = FigureCanvas(mpl_fig)
-                    canvas.setMinimumSize(400, 300) # Ensure minimum size
-                    self.viz_canvas_layout.addWidget(canvas)
-
-                    # Store the *original Plotly figure* for potential export
-                    self.current_visualization = {'type': 'plotly', 'figure': fig}
-                    self.status_label.setText(f"Plotly visualization displayed.")
-
-                except ImportError:
-                    self.status_label.setText("Error: Missing 'kaleido' package for Plotly image export.")
-                    error_label = QLabel("Error: Please install kaleido (`pip install -U kaleido`) to display Plotly charts.")
-                    self.viz_canvas_layout.addWidget(error_label)
-                except Exception as e:
-                    self.status_label.setText("Error displaying visualization.")
-                    error_label = QLabel(f"Could not display plot: {e}")
-                    self.viz_canvas_layout.addWidget(error_label)
-                    print(f"Visualization display error: {e}\n{traceback.format_exc()}")
-
-
-            elif viz_type == "table":
-                # Handle cases where 'data' might be a dict with 'message' OR a list of records
-                message = "Visualization resulted in tabular data (not plotted)." # Default message
-                if isinstance(viz_payload, dict) and "message" in viz_payload:
-                    # Case 1: Visualizer explicitly returned a message (e.g., "No results")
-                    message = viz_payload.get("message", message)
-                elif isinstance(viz_payload, list):
-                    # Case 2: Visualizer returned raw records (list of dicts)
-                    # Provide more context if it's a list of records
-                    record_count = len(viz_payload)
-                    message = f"Visualization generated tabular data ({record_count} records)."
-                    if record_count > 0:
-                        message += " Use 'Export Results' to view full data."
-                    else:
-                        message = "Visualization query resulted in no tabular data."
-
-                elif viz_payload is None:
-                    message = "Visualization resulted in empty table data."
-
-
-                label = QLabel(message)
-                label.setAlignment(Qt.AlignCenter)
-                label.setWordWrap(True) # Wrap long messages
-                self.viz_canvas_layout.addWidget(label)
-                self.status_label.setText("Visualization resulted in table (not plotted).")
-                self.current_visualization = None # No plottable figure
-
-            else:
-                # Handle other types or errors (including plotly failure if viz_payload wasn't a Figure)
-                error_msg = f"Unsupported or failed visualization type: {viz_type}"
-                if isinstance(viz_payload, dict) and "message" in viz_payload:
-                    error_msg = viz_payload.get("message", error_msg) # Use specific error message if available
-                elif viz_payload is None and viz_type == "plotly":
-                    error_msg = "Failed to generate Plotly figure data."
-
-                label = QLabel(error_msg)
-                label.setAlignment(Qt.AlignCenter)
-                label.setWordWrap(True)
-                self.viz_canvas_layout.addWidget(label)
-                self.status_label.setText("Visualization failed or type not supported.")
-                self.current_visualization = None
-
+            label = QLabel(error_msg)
+            label.setAlignment(Qt.AlignCenter)
+            label.setWordWrap(True)
+            self.viz_canvas_layout.addWidget(label)
+            self.status_label.setText("Visualization failed or type not supported.")
+            self.current_visualization = None
 
     def export_visualization(self):
+        """Diagnostic version with better debugging and direct fallback"""
         if not self.current_visualization or self.current_visualization['type'] != 'plotly':
-            self.status_label.setText("No exportable (Plotly) visualization available.")
+            self.status_label.setText("No exportable visualization available.")
             QMessageBox.information(self, "Export Error", "No Plotly visualization is currently displayed to export.")
             return
 
         # Default filename suggestion
-        default_filename = f"visualization_{datetime.now():%Y%m%d_%H%M%S}.png"
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Visualization", default_filename, "PNG Images (*.png);;JPEG Images (*.jpg);;SVG Vector Images (*.svg);;PDF Document (*.pdf)")
+        default_filename = f"visualization_{datetime.now():%Y%m%d_%H%M%S}"
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Save Visualization", 
+            default_filename, 
+            "HTML Document (*.html);;PNG Images (*.png);;JPEG Images (*.jpg)"
+        )
 
-        if file_path:
+        if not file_path:
+            return  # User canceled the dialog
+        
+        # Extract chosen format from selected filter
+        is_html = "HTML Document" in selected_filter
+        
+        # Make sure file has correct extension
+        file_ext = ".html" if is_html else ".png"
+        if not file_path.lower().endswith(file_ext):
+            file_path += file_ext
+        
+        self.status_label.setText(f"Preparing {os.path.basename(file_path)}...")
+        
+        # Prepare progress dialog for better user feedback
+        progress = QProgressDialog("Exporting visualization...", "Cancel", 0, 100, self)
+        progress.setWindowTitle("Export Progress")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)  # Show immediately
+        progress.setValue(10)
+        QApplication.processEvents()  # Force update of UI
+        
+        try:
+            # Get the figure object
+            fig = self.current_visualization['figure']
+            
+            # Use the simplest possible approach first - HTML export (most reliable)
+            if is_html:
+                progress.setValue(30)
+                progress.setLabelText("Generating HTML...")
+                QApplication.processEvents()
+                
+                try:
+                    # Direct HTML export without thread (should be fast enough)
+                    fig.write_html(file_path, include_plotlyjs='cdn')
+                    progress.setValue(100)
+                    self.status_label.setText(f"Visualization saved to {os.path.basename(file_path)}")
+                    QMessageBox.information(self, "Export Successful", 
+                                        f"Visualization saved successfully to:\n{file_path}")
+                    return
+                except Exception as e:
+                    self.status_label.setText(f"HTML export failed: {str(e)}")
+                    QMessageBox.critical(self, "Export Error", 
+                                        f"Failed to save HTML: {str(e)}\n\n{traceback.format_exc()}")
+                    return
+            
+            # For image export - try direct approach first
+            progress.setValue(30)
+            progress.setLabelText("Checking Kaleido installation...")
+            QApplication.processEvents()
+            
+            # Check if kaleido is available
             try:
-                 fig = self.current_visualization['figure']
-                 # write_image handles different extensions based on file_path
-                 fig.write_image(file_path, scale=3) # Use higher scale for export
-                 self.status_label.setText(f"Visualization exported to {os.path.basename(file_path)}")
-                 QMessageBox.information(self, "Export Successful", f"Visualization saved to:\n{file_path}")
+                import kaleido
+                kaleido_version = getattr(kaleido, "__version__", "unknown")
+                print(f"Kaleido version: {kaleido_version}")
             except ImportError:
-                  QMessageBox.critical(self, "Export Error", "Missing 'kaleido' package.\nPlease install using: pip install -U kaleido")
-                  self.status_label.setText("Export failed: Missing 'kaleido'.")
+                QMessageBox.critical(self, "Export Error", 
+                                "Kaleido package is not installed. Cannot export to image format.\n\n"
+                                "Please install using: pip install -U kaleido\n\n"
+                                "Would you like to save as HTML instead?")
+                return
+            
+            progress.setValue(50)
+            progress.setLabelText("Generating image file...")
+            QApplication.processEvents()
+            
+            # Try exporting with the byte array approach
+            try:
+                img_bytes = None
+                if file_path.lower().endswith('.png'):
+                    img_bytes = fig.to_image(format='png', scale=2)
+                elif file_path.lower().endswith('.jpg'):
+                    img_bytes = fig.to_image(format='jpg', scale=2)
+                
+                if img_bytes:
+                    progress.setValue(80)
+                    progress.setLabelText("Writing file...")
+                    QApplication.processEvents()
+                    
+                    # Write bytes to file
+                    with open(file_path, 'wb') as f:
+                        f.write(img_bytes)
+                    
+                    progress.setValue(100)
+                    self.status_label.setText(f"Visualization saved to {os.path.basename(file_path)}")
+                    QMessageBox.information(self, "Export Successful", 
+                                        f"Visualization saved successfully to:\n{file_path}")
+                    return
             except Exception as e:
-                 self.status_label.setText(f"Export failed: {e}")
-                 QMessageBox.critical(self, "Export Error", f"Could not save visualization:\n{e}")
-                 print(f"Visualization export error: {e}\n{traceback.format_exc()}")
+                print(f"Image export error: {str(e)}\n{traceback.format_exc()}")
+                
+                # Offer HTML as fallback
+                reply = QMessageBox.question(
+                    self, "Export Error",
+                    f"Failed to export as image: {str(e)}\n\nWould you like to save as HTML instead?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    # Save as HTML
+                    html_path = os.path.splitext(file_path)[0] + ".html"
+                    try:
+                        fig.write_html(html_path, include_plotlyjs='cdn')
+                        self.status_label.setText(f"HTML visualization saved to {os.path.basename(html_path)}")
+                        QMessageBox.information(self, "HTML Export Successful", 
+                                            f"Visualization saved as HTML to:\n{html_path}")
+                    except Exception as html_err:
+                        self.status_label.setText(f"HTML export failed: {str(html_err)}")
+                        QMessageBox.critical(self, "Export Error", 
+                                            f"Failed to save HTML: {str(html_err)}")
+                
+        except Exception as e:
+            self.status_label.setText(f"Export failed: {str(e)}")
+            QMessageBox.critical(self, "Export Error", f"Export failed: {str(e)}\n\n{traceback.format_exc()}")
+        finally:
+            progress.close()
+
+    def _handle_export_visualization_result(self, message):
+        """Handle the result from the export_visualization thread"""
+        self.progress_bar.setVisible(False)
+        
+        if message.startswith("ERROR:"):
+            error_msg = message[6:].strip()  # Remove "ERROR: " prefix
+            self.status_label.setText(f"Export failed: {error_msg}")
+            QMessageBox.critical(self, "Export Error", error_msg)
+        else:
+            self.status_label.setText(message)
+            QMessageBox.information(self, "Export Successful", f"{message}\n\nThe file has been saved successfully.")
 
 
     def export_results(self):
@@ -927,111 +1059,329 @@ class EONParserGUI(QMainWindow):
 
     # --- Report Generation ---
     def generate_report(self):
+        """Report generation with safe visualization handling for PDF"""
         # Check if results are available
         if self.current_results is None or self.current_summary is None:
             self.status_label.setText("No results available to generate a report.")
             QMessageBox.warning(self, "No Data", "Cannot generate report: No query results available.")
             return
 
-        # Prepare data for the report generator
+        # Prepare base report data (without visualization yet)
         report_data = {
             'title': self.report_title.text() or "Log Analysis Report",
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'query': self.current_summary.get('query') if self.include_query.isChecked() else None,
             'summary': self.current_summary if self.include_summary.isChecked() else None,
-             # Include only a sample of results in the report for performance/size
             'results_sample': self.current_results.head(100) if self.include_results_sample.isChecked() and not self.current_results.empty else None,
-            'visualization_path': None # Will be populated if viz is included
+            'visualization_path': None  # Will be populated only for HTML reports or if export succeeds
         }
 
-        # Handle visualization inclusion (requires temporary image file)
-        temp_viz_file = None
-        if self.include_viz.isChecked() and self.current_visualization and self.current_visualization['type'] == 'plotly':
+        # Get report format preference
+        report_format = self.report_format  # pdf or html
+        
+        # For PDF, check if we should include visualization based on kaleido availability
+        skip_viz_for_pdf = False
+        if report_format == 'pdf' and self.include_viz.isChecked():
             try:
-                # Create a temporary file that ReportLab can access
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                    temp_viz_file = tmp.name
-                    fig = self.current_visualization['figure']
-                    # Export using kaleido
-                    fig.write_image(temp_viz_file, scale=2) # Use good scale
-                    report_data['visualization_path'] = temp_viz_file
-                    print(f"Temporary visualization saved for report: {temp_viz_file}")
-
+                import kaleido
+                print(f"Kaleido version: {getattr(kaleido, '__version__', 'unknown')} found for PDF reports")
             except ImportError:
-                 QMessageBox.warning(self, "Report Warning", "Cannot include visualization in report: 'kaleido' package missing. Install with 'pip install -U kaleido'.")
-                 report_data['visualization_path'] = None # Ensure it's None if export fails
-                 temp_viz_file = None # Ensure no lingering reference
-            except Exception as e:
-                 QMessageBox.warning(self, "Report Warning", f"Could not export visualization for report: {e}")
-                 report_data['visualization_path'] = None
-                 temp_viz_file = None # Ensure no lingering reference
-                 print(f"Error saving visualization for report: {e}")
-
-
+                print("Kaleido not installed, visualizations will be skipped for PDF reports")
+                skip_viz_for_pdf = True
+                QMessageBox.warning(self, "Limited PDF Capabilities", 
+                                "The Kaleido package is not installed, so visualizations will be skipped in PDF reports.\n\n"
+                                "HTML reports will still include interactive visualizations.\n\n"
+                                "To enable visualizations in PDF, install Kaleido with:\npip install kaleido")
+        
         # Ask user where to save the report
-        report_format = self.report_format # pdf or html
-        default_filename = f"{report_data['title'].replace(' ', '_')}_{datetime.now():%Y%m%d}.{report_format}"
         if report_format == 'pdf':
-             filter_str = "PDF Document (*.pdf)"
+            filter_str = "PDF Document (*.pdf);;HTML Document (*.html)"
         else:
-             filter_str = "HTML Document (*.html)"
-
-        save_path, _ = QFileDialog.getSaveFileName(self, f"Save {report_format.upper()} Report", default_filename, filter_str)
+            filter_str = "HTML Document (*.html)"
+            
+        default_filename = f"{report_data['title'].replace(' ', '_')}_{datetime.now():%Y%m%d}.{report_format}"
+        save_path, selected_filter = QFileDialog.getSaveFileName(self, f"Save Report", default_filename, filter_str)
 
         if not save_path:
-             # User cancelled - clean up temp viz file if created
-             if temp_viz_file and os.path.exists(temp_viz_file):
-                 try: os.unlink(temp_viz_file)
-                 except OSError: pass
-             self.status_label.setText("Report generation cancelled.")
-             return
+            self.status_label.setText("Report generation cancelled.")
+            return
 
-
+        # Update format if user changed the selection
+        if "HTML Document" in selected_filter:
+            report_format = "html"
+        elif "PDF Document" in selected_filter:
+            report_format = "pdf"
+        
         # Ensure correct extension
         if not save_path.lower().endswith(f".{report_format}"):
-             save_path += f".{report_format}"
+            save_path += f".{report_format}"
 
         self.status_label.setText(f"Generating {report_format.upper()} report...")
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0,0)
+        self.progress_bar.setValue(10)
 
-        # --- Run report generation in thread ---
-        def report_thread_func(generator, data, path, format, viz_temp_path):
+        # --- Handle visualization ONLY for HTML reports (safer approach) ---
+        # For PDF reports, we'll skip visualization image creation since it's causing issues
+        temp_viz_file = None
+        if self.include_viz.isChecked() and self.current_visualization and self.current_visualization['type'] == 'plotly':
+            if report_format == 'html':
+                # For HTML, no need to create temp file, we'll embed directly
+                pass
+            elif not skip_viz_for_pdf:
+                # For PDF, try to create image but with timeout and careful error handling
+                self.status_label.setText("Preparing visualization for PDF report...")
+                self.progress_bar.setValue(20)
+                try:
+                    # For PDF, we need a temporary image file - using the safest approach
+                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                        temp_viz_file = tmp.name
+                    
+                    # Only use the direct bytes approach which is most reliable
+                    try:
+                        fig = self.current_visualization['figure']
+                        # Use a simplified version of the figure if possible
+                        if hasattr(fig, 'update_layout'):
+                            fig.update_layout(
+                                width=800, 
+                                height=500,
+                                font=dict(size=10)
+                            )
+                        
+                        # Try to get image bytes with a small timeout
+                        img_bytes = fig.to_image(format='png', scale=1.5)
+                        with open(temp_viz_file, 'wb') as f:
+                            f.write(img_bytes)
+                        report_data['visualization_path'] = temp_viz_file
+                        print(f"Visualization saved for PDF report: {temp_viz_file}")
+                    except Exception as e:
+                        print(f"Could not save visualization for PDF report: {e}")
+                        if temp_viz_file and os.path.exists(temp_viz_file):
+                            try:
+                                os.unlink(temp_viz_file)
+                            except:
+                                pass
+                        temp_viz_file = None
+                except Exception as e:
+                    print(f"Error preparing visualization: {e}")
+                    # Just continue without visualization
+                    if temp_viz_file and os.path.exists(temp_viz_file):
+                        try:
+                            os.unlink(temp_viz_file)
+                        except:
+                            pass
+                    temp_viz_file = None
+        
+        # --- Generate the report ---
+        self.progress_bar.setValue(30)
+        try:
+            # Generate HTML report directly (more reliable)
+            if report_format == 'html':
+                self.status_label.setText("Generating HTML report...")
+                self.progress_bar.setValue(50)
+                
+                # Generate HTML content using our custom method
+                html_content = self._generate_simple_html_report(report_data)
+                
+                self.progress_bar.setValue(80)
+                # Write HTML file
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                
+                success = True
+                report_file_path = save_path
+            
+            # For PDF, use the report generator class but with careful error handling
+            else:
+                self.status_label.setText("Generating PDF report...")
+                self.progress_bar.setValue(50)
+                
+                try:
+                    # Use the report generator with a timeout or careful monitoring
+                    report_file_path = self.report_generator.generate_report(report_data, save_path, report_format)
+                    success = report_file_path and os.path.exists(report_file_path)
+                except Exception as pdf_error:
+                    print(f"PDF generation error: {pdf_error}")
+                    
+                    # Ask if user wants HTML instead
+                    reply = QMessageBox.question(
+                        self, "PDF Generation Failed",
+                        f"Could not generate PDF report: {str(pdf_error)}\n\nWould you like to create an HTML report instead?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                    )
+                    
+                    if reply == QMessageBox.Yes:
+                        # Generate HTML instead
+                        html_path = os.path.splitext(save_path)[0] + ".html"
+                        html_content = self._generate_simple_html_report(report_data)
+                        with open(html_path, 'w', encoding='utf-8') as f:
+                            f.write(html_content)
+                        success = True
+                        report_file_path = html_path
+                    else:
+                        success = False
+                        report_file_path = None
+            
+            # Clean up the temporary visualization file if it exists
+            if temp_viz_file and os.path.exists(temp_viz_file):
+                try:
+                    os.unlink(temp_viz_file)
+                except Exception as e:
+                    print(f"Warning: Could not delete temp viz file {temp_viz_file}: {e}")
+            
+            # Handle success or failure
+            if success and report_file_path and os.path.exists(report_file_path):
+                self.progress_bar.setValue(100)
+                self.status_label.setText(f"Report saved to {os.path.basename(report_file_path)}")
+                
+                # Ask to open the file
+                reply = QMessageBox.question(
+                    self, "Report Generated",
+                    f"Report saved successfully to:\n{report_file_path}\n\nDo you want to open it?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    try:
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(report_file_path))
+                    except Exception as e:
+                        QMessageBox.warning(self, "Open Error", f"Could not open report file automatically: {e}")
+            else:
+                self.status_label.setText("Report generation failed.")
+                QMessageBox.critical(self, "Report Error", "Failed to generate the report.")
+        
+        except Exception as e:
+            print(f"Report generation error: {e}")
+            self.status_label.setText(f"Report generation failed: {str(e)}")
+            QMessageBox.critical(self, "Report Error", f"Failed to generate report: {str(e)}")
+        
+        finally:
+            self.progress_bar.setVisible(False)
+            # Ensure cleanup of temp file
+            if temp_viz_file and os.path.exists(temp_viz_file):
+                try:
+                    os.unlink(temp_viz_file)
+                except:
+                    pass
+            
+    def _generate_simple_html_report(self, report_data):
+        """Generate HTML report content directly (not using ReportGenerator)"""
+        html = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>{report_data.get('title', 'Log Analysis Report')}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; line-height: 1.5; }}
+                h1, h2, h3 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+                h1 {{ text-align: center; }}
+                table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 0.9em; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }}
+                th {{ background-color: #f2f2f2; font-weight: bold; }}
+                tr:nth-child(even) {{ background-color: #f9f9f9; }}
+                .summary, .query {{ background-color: #eef6f9; padding: 15px; border-radius: 5px; margin-bottom: 20px; }}
+                img.visualization {{ max-width: 100%; height: auto; border: 1px solid #ccc; margin-top: 10px; }}
+                .footer {{ margin-top: 30px; font-size: 0.8em; color: #7f8c8d; text-align: center; }}
+                .code {{ background-color: #f5f5f5; padding: 5px; border-radius: 3px; font-family: monospace; }}
+                ul {{ padding-left: 20px; }}
+            </style>
+        </head>
+        <body>
+            <h1>{report_data.get('title', 'Log Analysis Report')}</h1>
+            <p style="text-align: center;">Generated: {report_data.get('timestamp', 'N/A')}</p>
+        """
+
+        # Query section
+        query = report_data.get('query')
+        if query:
+            html += f"<h2>Query</h2><div class='query'><p class='code'>{query.replace('<', '&lt;').replace('>', '&gt;')}</p></div>"
+
+        # Summary section
+        summary = report_data.get('summary')
+        if summary:
+            html += "<h2>Summary</h2><div class='summary'>"
+            html += f"<p><strong>Total Matching Logs:</strong> {summary.get('total_logs', 'N/A')}</p>"
+            
+            if 'earliest_log' in summary and pd.notna(summary['earliest_log']):
+                time_format = '%Y-%m-%d %H:%M:%S %Z'
+                start = summary['earliest_log'].strftime(time_format)
+                end = summary['latest_log'].strftime(time_format)
+                html += f"<p><strong>Time Range of Results:</strong> {start} to {end}</p>"
+                html += f"<p><strong>Time Span (Hours):</strong> {summary.get('time_span_hours', 'N/A'):.2f}</p>"
+
+            if summary.get('keywords'):
+                html += f"<p><strong>Keywords Searched:</strong> {', '.join(summary['keywords'])}</p>"
+
+            # Distributions
+            if "log_type_distribution" in summary:
+                html += "<p><strong>Log Type Distribution:</strong></p><ul>"
+                sorted_types = sorted(summary["log_type_distribution"].items(), key=lambda item: item[1], reverse=True)
+                for k, v in sorted_types[:10]: 
+                    html += f"<li>{k}: {v}</li>"
+                if len(sorted_types) > 10: 
+                    html += "<li>...</li>"
+                html += "</ul>"
+
+            html += "</div>"  # End summary div
+
+        # Visualization section
+        if self.current_visualization and self.current_visualization['type'] == 'plotly' and self.include_viz.isChecked():
+            html += "<h2>Visualization</h2>"
             try:
-                report_file_path = generator.generate_report(data, path, format) # Pass save path
-                return report_file_path # Return the final path
-            finally:
-                 # --- IMPORTANT: Clean up the temporary viz file AFTER report is generated ---
-                 if viz_temp_path and os.path.exists(viz_temp_path):
-                     try:
-                         os.unlink(viz_temp_path)
-                         print(f"Cleaned up temp viz file: {viz_temp_path}")
-                     except OSError as e:
-                         print(f"Warning: Could not delete temp viz file {viz_temp_path}: {e}")
+                # Create a direct HTML representation of the Plotly figure
+                fig = self.current_visualization['figure']
+                viz_html = fig.to_html(include_plotlyjs='cdn', full_html=False)
+                html += f"<div>{viz_html}</div>"
+            except Exception as e:
+                html += f"<p><em>Error embedding visualization: {e}</em></p>"
 
-        self.start_thread(report_thread_func,
-                           self._handle_report_generated,
-                           self.handle_thread_error,
-                           self.report_generator, report_data, save_path, report_format, temp_viz_file) # Pass generator, data, path, format, temp file path
+        # Results Sample section
+        results_df = report_data.get('results_sample')
+        if results_df is not None and not results_df.empty:
+            html += f"<h2>Results Sample (First {len(results_df)} Records)</h2>"
+            # Convert DataFrame to HTML table, escape content
+            html += results_df.to_html(index=False, escape=True, border=0)
 
+        # Footer
+        html += """
+            <div class='footer'>
+                <p>Generated by EONParser</p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return html
 
-    def _handle_report_generated(self, report_file_path):
+    def _handle_report_generated(self, result):
+        """Handle the result from the report generation thread"""
         self.progress_bar.setVisible(False)
-        if report_file_path and os.path.exists(report_file_path):
-             self.status_label.setText(f"Report saved: {os.path.basename(report_file_path)}")
-             # Ask user if they want to open the report
-             reply = QMessageBox.question(self, 'Report Generated',
-                                          f"Report saved successfully to:\n{report_file_path}\n\nDo you want to open it?",
-                                          QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-             if reply == QMessageBox.Yes:
-                  try:
-                      # Use QDesktopServices for cross-platform opening
-                      QDesktopServices.openUrl(QUrl.fromLocalFile(report_file_path))
-                  except Exception as e:
-                       QMessageBox.warning(self, "Open Error", f"Could not open report file automatically: {e}")
+        
+        if result.get("success", False):
+            report_file_path = result.get("path")
+            if report_file_path and os.path.exists(report_file_path):
+                self.status_label.setText(f"Report saved: {os.path.basename(report_file_path)}")
+                # Ask user if they want to open the report
+                reply = QMessageBox.question(
+                    self, 
+                    'Report Generated',
+                    f"Report saved successfully to:\n{report_file_path}\n\nDo you want to open it?",
+                    QMessageBox.Yes | QMessageBox.No, 
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    try:
+                        # Use QDesktopServices for cross-platform opening
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(report_file_path))
+                    except Exception as e:
+                        QMessageBox.warning(self, "Open Error", f"Could not open report file automatically: {e}")
+            else:
+                self.status_label.setText("Report may have been generated but cannot be found.")
+                QMessageBox.warning(self, "Report Warning", f"Report was processed but the file cannot be found at: {report_file_path}")
         else:
-             self.status_label.setText("Report generation failed.")
-             QMessageBox.critical(self, "Report Error", f"Failed to generate or save the report. Path: {report_file_path}")
+            error_msg = result.get("error", "Unknown error")
+            self.status_label.setText("Report generation failed.")
+            QMessageBox.critical(self, "Report Error", f"Failed to generate the report: {error_msg}")
 
 
     # --- Application Closing ---
