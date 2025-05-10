@@ -2,16 +2,16 @@
 import os
 import pandas as pd
 from datetime import datetime
-import tempfile # Keep for potential HTML temp files if needed
+import tempfile  # Keep for potential HTML temp files if needed
 
 # --- ReportLab Imports ---
 try:
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak, Table, TableStyle
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER, TA_RIGHT
     from reportlab.lib.units import inch, cm
     from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter, A4 # Use A4 or letter
+    from reportlab.lib.pagesizes import letter, A4  # Use A4 or letter
     REPORTLAB_AVAILABLE = True
 except ImportError:
     print("⚠️ ReportLab library not found. PDF generation will be disabled.")
@@ -37,23 +37,66 @@ class ReportGenerator:
     def __init__(self):
         self.styles = getSampleStyleSheet() if REPORTLAB_AVAILABLE else {}
         if REPORTLAB_AVAILABLE:
-             # Customize styles if needed
-             self.styles['h1'].alignment = TA_CENTER
-             self.styles['h2'].alignment = TA_LEFT
-             self.styles['Normal'].alignment = TA_LEFT
+            # Create a copy of styles to modify
+            self.custom_styles = {}
+            
+            # Customize styles by creating new style objects
+            self.custom_styles['Heading1'] = ParagraphStyle(
+                'Heading1',
+                parent=self.styles['Heading1'],
+                alignment=TA_CENTER,
+                fontSize=16,
+                spaceAfter=12
+            )
+            
+            self.custom_styles['Heading2'] = ParagraphStyle(
+                'Heading2',
+                parent=self.styles['Heading2'],
+                fontSize=14,
+                spaceBefore=12,
+                spaceAfter=6
+            )
+            
+            self.custom_styles['Normal'] = ParagraphStyle(
+                'Normal',
+                parent=self.styles['Normal'],
+                fontSize=10,
+                spaceBefore=6,
+                spaceAfter=6
+            )
+            
+            self.custom_styles['Code'] = ParagraphStyle(
+                'Code',
+                parent=self.styles['Normal'],
+                fontName='Courier',
+                fontSize=9,
+                leftIndent=20,
+                rightIndent=20,
+                spaceBefore=6,
+                spaceAfter=6,
+                backColor=colors.lightgrey
+            )
+            
+            # Replace original styles with our customized version
+            self.styles = self.custom_styles
 
     def _generate_pdf_report(self, report_data, save_path):
         """ Generates a PDF report using ReportLab. """
         if not REPORTLAB_AVAILABLE:
             raise ImportError("ReportLab library is required for PDF generation.")
 
-        doc = SimpleDocTemplate(save_path, pagesize=A4,
-                                title=report_data.get('title', "Log Analysis Report"))
+        doc = SimpleDocTemplate(
+            save_path, 
+            pagesize=A4,
+            title=report_data.get('title', "Log Analysis Report"),
+            author="EONParser",
+            subject="Log Analysis Report"
+        )
         story = []
 
         # --- Title ---
         title = report_data.get('title', "Log Analysis Report")
-        story.append(Paragraph(title, self.styles['h1']))
+        story.append(Paragraph(title, self.styles['Heading1']))
         story.append(Spacer(1, 0.2*inch))
 
         # --- Timestamp ---
@@ -64,18 +107,25 @@ class ReportGenerator:
         # --- Query ---
         query = report_data.get('query')
         if query:
-            story.append(Paragraph("Query:", self.styles['h2']))
-            # Use a Code style if available or format differently
-            code_style = self.styles.get('Code', self.styles['Normal'])
-            code_style.fontSize = 9
-            story.append(Paragraph(query.replace('\n', '<br/>'), code_style))
+            story.append(Paragraph("Search Parameters:", self.styles['Heading2']))
+            story.append(Paragraph(query.replace('\n', '<br/>'), self.styles['Code']))
             story.append(Spacer(1, 0.2*inch))
 
         # --- Summary ---
         summary = report_data.get('summary')
         if summary:
-            story.append(Paragraph("Summary:", self.styles['h2']))
+            story.append(Paragraph("Summary:", self.styles['Heading2']))
             summary_text = f"Total Matching Logs: {summary.get('total_logs', 'N/A')}<br/>"
+            
+            if 'time_range' in summary and summary['time_range']:
+                start = summary['time_range'].get('start')
+                end = summary['time_range'].get('end')
+                
+                if start:
+                    summary_text += f"Time Range Start: {start.strftime('%Y-%m-%d %H:%M:%S %Z')}<br/>"
+                if end:
+                    summary_text += f"Time Range End: {end.strftime('%Y-%m-%d %H:%M:%S %Z')}<br/>"
+            
             if 'earliest_log' in summary and pd.notna(summary['earliest_log']):
                 time_format = '%Y-%m-%d %H:%M:%S %Z'
                 start = summary['earliest_log'].strftime(time_format)
@@ -83,85 +133,131 @@ class ReportGenerator:
                 summary_text += f"Time Range of Results: {start} to {end}<br/>"
                 summary_text += f"Time Span (Hours): {summary.get('time_span_hours', 'N/A'):.2f}<br/>"
 
-            if summary.get('keywords'):
-                summary_text += f"Keywords Searched: {', '.join(summary['keywords'])}<br/>"
+            if summary.get('query_params'):
+                summary_text += "<br/>Search Criteria:<br/>"
+                for key, value in summary.get('query_params', {}).items():
+                    if value:
+                        summary_text += f"- {key.replace('_', ' ').title()}: {value}<br/>"
 
             story.append(Paragraph(summary_text, self.styles['Normal']))
             story.append(Spacer(1, 0.1*inch))
 
             # Distributions (Example for log_type)
-            if "log_type_distribution" in summary:
-                 story.append(Paragraph("Log Type Distribution:", self.styles['h3']))
-                 dist_data = [['Log Type', 'Count']]
-                 # Sort and limit for display
-                 sorted_types = sorted(summary["log_type_distribution"].items(), key=lambda item: item[1], reverse=True)
-                 for k, v in sorted_types[:10]: # Limit rows in table
-                     dist_data.append([Paragraph(str(k), self.styles['SmallText']), str(v)]) # Wrap long text
-                 if len(sorted_types) > 10: dist_data.append(["...", "..."])
+            for field in ['action', 'protocol', 'severity', 'hostname', 'message_id']:
+                dist_key = f"{field}_distribution"
+                if dist_key in summary:
+                    story.append(Paragraph(f"{field.replace('_', ' ').title()} Distribution (Top 10):", self.styles['Heading2']))
+                    dist_data = [['Value', 'Count']]
+                    # Sort and limit for display
+                    sorted_items = sorted(summary[dist_key].items(), key=lambda item: item[1], reverse=True)
+                    for k, v in sorted_items[:10]:  # Limit rows in table
+                        dist_data.append([k, str(v)])
+                    if len(sorted_items) > 10: 
+                        dist_data.append(["...", "..."])
 
-                 table = Table(dist_data, colWidths=[3*inch, 1*inch])
-                 table.setStyle(TableStyle([
-                     ('BACKGROUND', (0,0), (-1,0), colors.grey),
-                     ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),
-                     ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                     ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                     ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                     ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-                     ('GRID', (0,0), (-1,-1), 1, colors.black)
-                 ]))
-                 story.append(table)
-                 story.append(Spacer(1, 0.2*inch))
+                    table = Table(dist_data, colWidths=[4*inch, 1*inch])
+                    table.setStyle(TableStyle([
+                        ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                        ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                        ('GRID', (0,0), (-1,-1), 1, colors.black)
+                    ]))
+                    story.append(table)
+                    story.append(Spacer(1, 0.2*inch))
 
-            # Add other distributions (action, IPs) similarly if needed
+            # IP distribution tables
+            for ip_field in ['top_src_ip', 'top_dst_ip']:
+                if ip_field in summary:
+                    field_name = 'Source IP' if ip_field == 'top_src_ip' else 'Destination IP'
+                    story.append(Paragraph(f"Top {field_name} Addresses:", self.styles['Heading2']))
+                    ip_data = [['IP Address', 'Count']]
+                    sorted_ips = sorted(summary[ip_field].items(), key=lambda item: item[1], reverse=True)
+                    for ip, count in sorted_ips[:10]:
+                        ip_data.append([ip, str(count)])
+                    if len(sorted_ips) > 10: 
+                        ip_data.append(["...", "..."])
+                        
+                    ip_table = Table(ip_data, colWidths=[4*inch, 1*inch])
+                    ip_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                        ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                        ('GRID', (0,0), (-1,-1), 1, colors.black)
+                    ]))
+                    story.append(ip_table)
+                    story.append(Spacer(1, 0.2*inch))
 
         # --- Visualization ---
         viz_path = report_data.get('visualization_path')
-        if viz_path and os.path.exists(viz_path):
-             story.append(PageBreak()) # Start visualization on new page
-             story.append(Paragraph("Visualization:", self.styles['h2']))
-             try:
-                 # Adjust width/height as needed, maintain aspect ratio
-                 img = Image(viz_path, width=6.5*inch, height=4.5*inch, kind='proportional')
-                 story.append(img)
-                 story.append(Spacer(1, 0.2*inch))
-             except Exception as e:
-                 story.append(Paragraph(f"Error embedding visualization: {e}", self.styles['Normal']))
-                 print(f"Error reading/embedding image {viz_path}: {e}")
+        current_viz = report_data.get('current_visualization')
 
+        if self.include_viz and ((viz_path and os.path.exists(viz_path)) or current_viz):
+            story.append(PageBreak())  # Start visualization on new page
+            story.append(Paragraph("Visualization:", self.styles['Heading2']))
+            
+            if viz_path and os.path.exists(viz_path):
+                try:
+                    # Adjust width/height as needed, maintain aspect ratio
+                    img = Image(viz_path, width=6.5*inch, height=4.5*inch)
+                    story.append(img)
+                    story.append(Spacer(1, 0.2*inch))
+                except Exception as e:
+                    story.append(Paragraph(f"Error embedding visualization: {e}", self.styles['Normal']))
+                    print(f"Error reading/embedding image {viz_path}: {e}")
+            elif current_viz and current_viz.get('type') == 'plotly' and 'figure' in current_viz:
+                # For PDF, we need to save the visualization to a temporary file
+                try:
+                    temp_viz_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
+                    fig = current_viz['figure']
+                    img_bytes = fig.to_image(format='png', scale=1.5)
+                    with open(temp_viz_file, 'wb') as f:
+                        f.write(img_bytes)
+                    
+                    img = Image(temp_viz_file, width=6.5*inch, height=4.5*inch)
+                    story.append(img)
+                    story.append(Spacer(1, 0.2*inch))
+                    
+                    # Clean up temp file
+                    os.unlink(temp_viz_file)
+                except Exception as e:
+                    story.append(Paragraph(f"Error creating visualization image: {e}", self.styles['Normal']))
 
         # --- Results Sample ---
         results_df = report_data.get('results_sample')
         if results_df is not None and not results_df.empty:
             story.append(PageBreak()) # Start results on new page
-            story.append(Paragraph(f"Results Sample (First {len(results_df)} Records):", self.styles['h2']))
+            story.append(Paragraph(f"Results Sample (First {len(results_df)} Records):", self.styles['Heading2']))
             story.append(Spacer(1, 0.1*inch))
 
             # Prepare data for ReportLab Table (convert all to string)
-            # Use a smaller font for table data
-            table_style = self.styles['SmallText'] if 'SmallText' in self.styles else self.styles['Normal']
-            table_style.fontSize = 7 # Smaller font size
-            table_style.leading = 9 # Adjust line spacing
-
-            # Function to wrap text in paragraphs for table cells
-            def create_cell(text):
-                return Paragraph(str(text), table_style)
-
-            # Convert DataFrame to list of lists with Paragraph objects
-            headers = [create_cell(col) for col in results_df.columns]
+            # Convert DataFrame to list of lists for table
+            headers = [col for col in results_df.columns]
             data = [headers]
+            
             for _, row in results_df.iterrows():
-                 data.append([create_cell(val) if pd.notna(val) else '' for val in row])
+                data.append([str(val) if pd.notna(val) else '' for val in row])
 
-
-            # Create and style the table
-            # Calculate column widths dynamically or set fixed widths
-            num_cols = len(results_df.columns)
-            available_width = 7 * inch # Approx width available on A4
-            col_width = available_width / num_cols if num_cols > 0 else available_width
-
+            # Create and style the table - limit columns to fit on page
+            max_cols = min(len(headers), 5)  # Limit to 5 columns to fit on page
+            truncated_data = [row[:max_cols] for row in data]
+            if max_cols < len(headers):
+                # Add note about truncated columns
+                story.append(Paragraph(f"Note: Only showing {max_cols} of {len(headers)} columns due to space constraints.", 
+                                      self.styles['Normal']))
+                
+            col_widths = [1.2*inch] * max_cols  # Evenly distribute column widths
+            
             try:
-                 table = Table(data, colWidths=[col_width] * num_cols)
-                 table.setStyle(TableStyle([
+                table = Table(truncated_data, colWidths=col_widths)
+                table.setStyle(TableStyle([
                     ('BACKGROUND', (0,0), (-1,0), colors.darkblue), # Header background
                     ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),   # Header text color
                     ('ALIGN', (0,0), (-1,-1), 'LEFT'),             # Align all left
@@ -169,30 +265,22 @@ class ReportGenerator:
                     ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), # Header font
                     ('FONTSIZE', (0,0), (-1,-1), 7),               # Data font size
                     ('BOTTOMPADDING', (0,0), (-1,0), 8),           # Header padding
-                    ('TOPPADDING', (0,1), (-1,-1), 4),             # Data padding
-                    ('BOTTOMPADDING', (0,1), (-1,-1), 4),          # Data padding
-                    ('BACKGROUND', (0,1), (-1,-1), colors.white), # Data background
-                    ('GRID', (0,0), (-1,-1), 0.5, colors.grey)     # Grid lines
-                 ]))
-                 story.append(table)
+                    ('BACKGROUND', (0,1), (-1,-1), colors.white),  # Data background
+                    ('GRID', (0,0), (-1,-1), 0.5, colors.grey),    # Grid lines
+                    ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.white])  # Alternating row colors
+                ]))
+                story.append(table)
             except Exception as table_err:
-                 story.append(Paragraph(f"Error generating results table: {table_err}", self.styles['Normal']))
-                 print(f"Reportlab table error: {table_err}")
-
+                story.append(Paragraph(f"Error generating results table: {table_err}", self.styles['Normal']))
+                print(f"Reportlab table error: {table_err}")
 
         # --- Build PDF ---
-        try:
-            doc.build(story)
-            print(f"PDF Report generated successfully: {save_path}")
-            return save_path
-        except Exception as e:
-            print(f"❌ Error building PDF report: {e}\n{traceback.format_exc()}")
-            # Re-raise or handle as appropriate
-            raise
+        doc.build(story)
+        print(f"PDF Report generated successfully: {save_path}")
+        return save_path
 
-
-    def _generate_html_report(self, report_data, save_path):
-        """ Generates an HTML report (kept similar to original for now). """
+    def _generate_simple_html_report(self, report_data):
+        """Generate a simple HTML report as a string"""
         html = f"""
         <!DOCTYPE html>
         <html lang="en">
@@ -200,7 +288,7 @@ class ReportGenerator:
             <meta charset="UTF-8">
             <title>{report_data.get('title', 'Log Analysis Report')}</title>
             <style>
-                body {{ font-family: sans-serif; margin: 20px; line-height: 1.5; }}
+                body {{ font-family: Arial, sans-serif; margin: 20px; line-height: 1.5; }}
                 h1, h2, h3 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
                 h1 {{ text-align: center; }}
                 table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 0.9em; }}
@@ -212,6 +300,8 @@ class ReportGenerator:
                 .footer {{ margin-top: 30px; font-size: 0.8em; color: #7f8c8d; text-align: center; }}
                 .code {{ background-color: #f5f5f5; padding: 5px; border-radius: 3px; font-family: monospace; }}
                 ul {{ padding-left: 20px; }}
+                .distribution {{ margin-bottom: 20px; }}
+                .chart-container {{ text-align: center; margin: 20px 0; }}
             </style>
         </head>
         <body>
@@ -219,77 +309,117 @@ class ReportGenerator:
             <p style="text-align: center;">Generated: {report_data.get('timestamp', 'N/A')}</p>
         """
 
-        # Query
+        # Query section
         query = report_data.get('query')
         if query:
-            html += f"<h2>Query</h2><div class='query'><p class='code'>{query.replace('<', '&lt;').replace('>', '&gt;')}</p></div>"
+            html += f'<h2>Search Parameters</h2><div class="query"><pre class="code">{query}</pre></div>'
 
-        # Summary
+        # Summary section
         summary = report_data.get('summary')
         if summary:
-            html += "<h2>Summary</h2><div class='summary'>"
-            html += f"<p><strong>Total Matching Logs:</strong> {summary.get('total_logs', 'N/A')}</p>"
+            html += '<h2>Summary</h2><div class="summary">'
+            html += f'<p><strong>Total Matching Logs:</strong> {summary.get("total_logs", "N/A")}</p>'
+            
+            # Time range info
+            if 'time_range' in summary and summary['time_range']:
+                start = summary['time_range'].get('start')
+                end = summary['time_range'].get('end')
+                
+                if start:
+                    html += f'<p><strong>Time Range Start:</strong> {start.strftime("%Y-%m-%d %H:%M:%S %Z")}</p>'
+                if end:
+                    html += f'<p><strong>Time Range End:</strong> {end.strftime("%Y-%m-%d %H:%M:%S %Z")}</p>'
+            
             if 'earliest_log' in summary and pd.notna(summary['earliest_log']):
                 time_format = '%Y-%m-%d %H:%M:%S %Z'
                 start = summary['earliest_log'].strftime(time_format)
                 end = summary['latest_log'].strftime(time_format)
-                html += f"<p><strong>Time Range of Results:</strong> {start} to {end}</p>"
-                html += f"<p><strong>Time Span (Hours):</strong> {summary.get('time_span_hours', 'N/A'):.2f}</p>"
+                html += f'<p><strong>Time Range of Results:</strong> {start} to {end}</p>'
+                html += f'<p><strong>Time Span (Hours):</strong> {summary.get("time_span_hours", "N/A"):.2f}</p>'
 
-            if summary.get('keywords'):
-                html += f"<p><strong>Keywords Searched:</strong> {', '.join(summary['keywords'])}</p>"
+            # Show search criteria
+            if summary.get('query_params'):
+                html += '<h3>Search Criteria</h3><ul>'
+                for key, value in summary.get('query_params', {}).items():
+                    if value:
+                        html += f'<li><strong>{key.replace("_", " ").title()}:</strong> {value}</li>'
+                html += '</ul>'
 
-            # Distributions (add more as needed)
-            if "log_type_distribution" in summary:
-                html += "<p><strong>Log Type Distribution:</strong></p><ul>"
-                sorted_types = sorted(summary["log_type_distribution"].items(), key=lambda item: item[1], reverse=True)
-                for k, v in sorted_types[:10]: html += f"<li>{k}: {v}</li>"
-                if len(sorted_types) > 10: html += "<li>...</li>"
-                html += "</ul>"
+            html += '</div>'  # End summary div
 
-            html += "</div>" # End summary div
+            # Add distributions
+            for field in ['action', 'protocol', 'severity', 'hostname', 'message_id']:
+                dist_key = f'{field}_distribution'
+                if dist_key in summary:
+                    html += f'<div class="distribution"><h3>{field.replace("_", " ").title()} Distribution</h3><table>'
+                    html += '<tr><th>Value</th><th>Count</th></tr>'
+                    
+                    sorted_items = sorted(summary[dist_key].items(), key=lambda item: item[1], reverse=True)
+                    for k, v in sorted_items[:10]:
+                        html += f'<tr><td>{k}</td><td>{v}</td></tr>'
+                    
+                    if len(sorted_items) > 10:
+                        html += '<tr><td colspan="2">...</td></tr>'
+                    
+                    html += '</table></div>'
+            
+            # Add IP statistics
+            for ip_field in ['top_src_ip', 'top_dst_ip']:
+                if ip_field in summary:
+                    field_name = 'Source IP' if ip_field == 'top_src_ip' else 'Destination IP'
+                    html += f'<div class="distribution"><h3>Top {field_name} Addresses</h3><table>'
+                    html += '<tr><th>IP Address</th><th>Count</th></tr>'
+                    
+                    sorted_ips = sorted(summary[ip_field].items(), key=lambda item: item[1], reverse=True)
+                    for ip, count in sorted_ips[:10]:
+                        html += f'<tr><td>{ip}</td><td>{count}</td></tr>'
+                    
+                    if len(sorted_ips) > 10:
+                        html += '<tr><td colspan="2">...</td></tr>'
+                    
+                    html += '</table></div>'
 
-
-        # Visualization
-        viz_path = report_data.get('visualization_path')
-        if viz_path and os.path.exists(viz_path):
-            html += "<h2>Visualization</h2>"
+        # Visualization section
+        current_visualization = report_data.get('current_visualization')
+        if current_visualization and current_visualization.get('type') == 'plotly' and current_visualization.get('figure'):
+            html += '<h2>Visualization</h2>'
+            html += '<div class="chart-container">'
+            
             try:
-                # Embed image using base64 data URI
-                import base64
-                with open(viz_path, 'rb') as img_file:
-                    img_data = base64.b64encode(img_file.read()).decode()
-                html += f"<img src='data:image/png;base64,{img_data}' alt='Visualization' class='visualization'>"
+                # For HTML reports, we can embed the Plotly figure directly
+                fig = current_visualization.get('figure')
+                if fig:
+                    # This is the key line that might be missing - it converts the Plotly figure to HTML
+                    viz_html = fig.to_html(include_plotlyjs='cdn', full_html=False)
+                    html += viz_html
             except Exception as e:
-                html += f"<p><em>Error embedding visualization: {e}</em></p>"
+                html += f'<p><em>Error embedding visualization: {e}</em></p>'
+            
+            html += '</div>'
+        elif report_data.get('visualization_path'):
+            # For static image from path
+            viz_path = report_data.get('visualization_path')
+            if os.path.exists(viz_path):
+                html += '<h2>Visualization</h2>'
+                html += f'<div class="chart-container"><img src="{viz_path}" alt="Visualization" class="visualization"></div>'
 
-
-        # Results Sample
+        # Results Sample section
         results_df = report_data.get('results_sample')
         if results_df is not None and not results_df.empty:
-            html += f"<h2>Results Sample (First {len(results_df)} Records)</h2>"
-            # Convert DataFrame to HTML table, escape content
-            html += results_df.to_html(index=False, escape=True, border=0) # Use pandas to_html
+            html += f'<h2>Results Sample (First {len(results_df)} Records)</h2>'
+            html += results_df.to_html(index=False, escape=True, classes="dataframe")
 
         # Footer
         html += """
-            <div class='footer'>
+            <div class="footer">
                 <p>Generated by EONParser</p>
             </div>
         </body>
         </html>
         """
+        
+        return html
 
-        try:
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write(html)
-            print(f"HTML Report generated successfully: {save_path}")
-            return save_path
-        except Exception as e:
-            print(f"❌ Error writing HTML report: {e}")
-            raise
-
-    # --- Main generate method ---
     def generate_report(self, report_data, save_path, report_format='pdf'):
         """
         Generates the report in the specified format and saves it to save_path.
@@ -307,14 +437,25 @@ class ReportGenerator:
             if report_format == 'pdf':
                 return self._generate_pdf_report(report_data, save_path)
             elif report_format == 'html':
-                return self._generate_html_report(report_data, save_path)
+                # Generate HTML content
+                html_content = self._generate_simple_html_report(report_data)
+                
+                # Write to file
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                    
+                return save_path
             else:
                 print(f"Error: Unsupported report format '{report_format}'")
                 return None
         except Exception as e:
+             import traceback
              print(f"Report generation failed: {e}")
-             # Clean up potential partial file?
+             print(traceback.format_exc())
+             # Clean up potential partial file
              if os.path.exists(save_path):
-                 try: os.remove(save_path)
-                 except OSError: pass
+                 try: 
+                     os.remove(save_path)
+                 except OSError: 
+                     pass
              return None # Indicate failure
